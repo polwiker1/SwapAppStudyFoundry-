@@ -1,85 +1,94 @@
-## Foundry
+# SwapApp (Foundry)
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+`SwapApp` es un smart contract de intercambio de tokens ERC-20 que se integra con un router tipo Uniswap V2 y agrega un modelo de incentivos con token de gobernanza.
 
-Foundry consists of:
+## Que problema resuelve
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+Permite hacer swaps de tokens mientras:
 
-## Documentation
+- Cobra una fee configurable por operacion.
+- Envia esa fee a una treasury.
+- Recompensa al usuario con un token de gobernanza en base a un porcentaje de la fee.
+- Si no hay suficiente liquidez de token de gobernanza, guarda la recompensa pendiente para reclamarla despues.
 
-https://book.getfoundry.sh/
+## Como funciona
 
-## Usage
+1. El usuario llama `swapTokens(...)` con `amountIn`, `path`, `amountOutMin` y `deadline`.
+2. El contrato calcula la fee (`feeBps`) y separa:
+- `feeAmount` para treasury.
+- `amountToSwap` para el router.
+3. Ejecuta el swap en el router V2.
+4. Calcula recompensa en governance token:
+- `% fee para rewards` (`rewardShareBps`).
+- `tasa gov por fee` (`govTokensPerFeeToken`).
+5. Si hay balance suficiente de token GOV, paga al usuario.
+6. Si no alcanza, paga parcial y guarda el resto en `pendingGovRewards`.
 
-### Build
+## Ventajas del enfoque
 
-```shell
-$ forge build
+- Monetizacion clara del protocolo via treasury.
+- Incentivos directos al usuario sin afectar la UX del swap.
+- Parametros de negocio configurables por owner:
+- `setFeeParams`
+- `setTreasury`
+- `setGovTokensPerFeeToken`
+- Compatible con routers V2 existentes.
+- Incluye estrategia de pagos pendientes para no bloquear swaps por falta de liquidez de rewards.
+
+## Arquitectura del proyecto
+
+- Contrato principal: [src/swappApp.sol](/home/pablowiker/foundry-study/swapApp/src/swappApp.sol)
+- Token de gobernanza: [src/GovernanceToken.sol](/home/pablowiker/foundry-study/swapApp/src/GovernanceToken.sol)
+- Tests unitarios + fork: [test/SwapApp.t.sol](/home/pablowiker/foundry-study/swapApp/test/SwapApp.t.sol)
+
+## Requisitos
+
+- Foundry instalado (`forge`, `cast`, `anvil`).
+- Para pruebas de fork: variable `ARBITRUM_RPC_URL`.
+
+## Uso rapido
+
+### Compilar
+
+```bash
+forge build
 ```
 
-### Test
+### Ejecutar tests unitarios
 
-```shell
-$ forge test
+```bash
+forge test -vv
 ```
 
-### Test con fork de Arbitrum
+### Ejecutar test de integracion con fork de Arbitrum
 
-```shell
-$ export ARBITRUM_RPC_URL=https://arb1.arbitrum.io/rpc
-$ forge test --fork-url arbitrum -vv
+```bash
+export ARBITRUM_RPC_URL=https://arb1.arbitrum.io/rpc
+forge test --match-test test_fork_swap_on_arbitrum_router --fork-url arbitrum -vv
 ```
 
-Opcional: fijar un bloque para tener resultados reproducibles.
+Router usado en el test de fork (Arbitrum):
 
-```shell
-$ forge test --fork-url arbitrum --fork-block-number 320000000 -vv
+- `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24`
+
+### Coverage
+
+```bash
+forge coverage --report summary
 ```
 
-Ejecutar solo el test de integración de Arbitrum:
+### Formato
 
-```shell
-$ forge test --match-test test_fork_swap_on_arbitrum_router --fork-url arbitrum -vv
+```bash
+forge fmt
+forge fmt --check
 ```
 
-### Format
+## Nota de seguridad
 
-```shell
-$ forge fmt
-```
+Este repositorio es un proyecto educativo/prototipo. Antes de usar en produccion se recomienda:
 
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+- Auditoria externa.
+- Manejo seguro de ownership (multisig/timelock).
+- Politica operativa para fondeo de rewards.
+- Monitoreo de eventos y parametros on-chain.
