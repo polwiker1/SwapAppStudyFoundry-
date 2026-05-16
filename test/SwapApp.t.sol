@@ -16,13 +16,10 @@ contract MockERC20 is ERC20 {
 }
 
 contract MockRouter {
-    function swapExactTokensForTokens(
-        uint256 amountIn,
-        uint256,
-        address[] calldata path,
-        address to,
-        uint256
-    ) external returns (uint256[] memory amounts) {
+    function swapExactTokensForTokens(uint256 amountIn, uint256, address[] calldata path, address to, uint256)
+        external
+        returns (uint256[] memory amounts)
+    {
         MockERC20(path[0]).transferFrom(msg.sender, address(this), amountIn);
         MockERC20(path[path.length - 1]).mint(to, amountIn);
 
@@ -31,11 +28,7 @@ contract MockRouter {
         amounts[path.length - 1] = amountIn;
     }
 
-    function getAmountsOut(uint256 amountIn, address[] calldata path)
-        external
-        pure
-        returns (uint256[] memory amounts)
-    {
+    function getAmountsOut(uint256 amountIn, address[] calldata path) external pure returns (uint256[] memory amounts) {
         amounts = new uint256[](path.length);
         amounts[0] = amountIn;
         amounts[path.length - 1] = amountIn;

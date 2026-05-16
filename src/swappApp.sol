@@ -81,12 +81,10 @@ contract SwappApp is Ownable {
         return amountOutMins[path_.length - 1];
     }
 
-    function swapTokens(
-        uint256 amountIn_,
-        uint256 amountOutMin_,
-        address[] calldata path_,
-        uint256 deadline_
-    ) external returns (uint256 amountOut) {
+    function swapTokens(uint256 amountIn_, uint256 amountOutMin_, address[] calldata path_, uint256 deadline_)
+        external
+        returns (uint256 amountOut)
+    {
         require(path_.length >= 2, "bad path");
 
         IERC20 tokenIn = IERC20(path_[0]);
@@ -100,13 +98,8 @@ contract SwappApp is Ownable {
         }
 
         tokenIn.forceApprove(v2Router02Address, amountToSwap);
-        uint256[] memory amountsOut = IV2Router02(v2Router02Address).swapExactTokensForTokens(
-            amountToSwap,
-            amountOutMin_,
-            path_,
-            msg.sender,
-            deadline_
-        );
+        uint256[] memory amountsOut = IV2Router02(v2Router02Address)
+            .swapExactTokensForTokens(amountToSwap, amountOutMin_, path_, msg.sender, deadline_);
 
         amountOut = amountsOut[amountsOut.length - 1];
 
@@ -126,14 +119,7 @@ contract SwappApp is Ownable {
             }
         }
 
-        emit SwapExecuted(
-            msg.sender,
-            path_[0],
-            path_[path_.length - 1],
-            amountIn_,
-            amountToSwap,
-            feeAmount
-        );
+        emit SwapExecuted(msg.sender, path_[0], path_[path_.length - 1], amountIn_, amountToSwap, feeAmount);
     }
 
     function claimPendingGovRewards() external returns (uint256 claimed) {
