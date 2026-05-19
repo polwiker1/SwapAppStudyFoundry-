@@ -1,52 +1,67 @@
 # SwapApp (Foundry)
 
-`SwapApp` es un smart contract de intercambio de tokens ERC-20 que se integra con un router tipo Uniswap V2 y agrega un modelo de incentivos con token de gobernanza.
+`SwapApp` es un smart contract DeFi sobre Foundry que integra un router tipo Uniswap V2 para resolver dos flujos:
 
-## Que problema resuelve
+- Swaps con fee de protocolo y rewards en token de gobernanza.
+- Provision de liquidez partiendo de un solo token (USDC) en una sola operacion.
 
-Permite hacer swaps de tokens mientras:
+## Propuesta de valor
 
-- Cobra una fee configurable por operacion.
-- Envia esa fee a una treasury.
-- Recompensa al usuario con un token de gobernanza en base a un porcentaje de la fee.
-- Si no hay suficiente liquidez de token de gobernanza, guarda la recompensa pendiente para reclamarla despues.
+El objetivo es simplificar una operatoria financiera que suele ser manual:
 
-## Como funciona
+1. Entrar con USDC.
+2. Convertir automaticamente una parte al token par via `path`.
+3. Agregar liquidez al pool.
+4. Recibir LP tokens y participar proporcionalmente de las comisiones del pool (0.3% por swap en Uniswap V2 estandar).
 
-1. El usuario llama `swapTokens(...)` con `amountIn`, `path`, `amountOutMin` y `deadline`.
-2. El contrato calcula la fee (`feeBps`) y separa:
-- `feeAmount` para treasury.
-- `amountToSwap` para el router.
-3. Ejecuta el swap en el router V2.
-4. Calcula recompensa en governance token:
-- `% fee para rewards` (`rewardShareBps`).
-- `tasa gov por fee` (`govTokensPerFeeToken`).
-5. Si hay balance suficiente de token GOV, paga al usuario.
-6. Si no alcanza, paga parcial y guarda el resto en `pendingGovRewards`.
+Esto reduce friccion operativa y errores manuales en procesos DeFi.
 
-## Ventajas del enfoque
+## Flujos implementados
 
-- Monetizacion clara del protocolo via treasury.
-- Incentivos directos al usuario sin afectar la UX del swap.
-- Parametros de negocio configurables por owner:
-- `setFeeParams`
-- `setTreasury`
-- `setGovTokensPerFeeToken`
-- Compatible con routers V2 existentes.
-- Incluye estrategia de pagos pendientes para no bloquear swaps por falta de liquidez de rewards.
+### 1) `swapTokens(...)`
 
-## Arquitectura del proyecto
+- Cobra fee configurable (`feeBps`).
+- Envia fee a `treasury`.
+- Calcula y paga reward en token GOV segun:
+- `rewardShareBps`
+- `govTokensPerFeeToken`
+- Si no hay GOV suficiente, registra saldo pendiente en `pendingGovRewards`.
+
+### 2) `addLiquiditySingleTokenUSDC(...)`
+
+- Recibe USDC desde el usuario.
+- Divide monto 50/50:
+- una parte se swapea a `tokenOther`
+- la otra queda en USDC
+- Agrega liquidez al par `USDC/tokenOther`.
+- Aplica protecciones de ejecucion:
+- `deadline`
+- `amountOutMinSwap`
+- `amountUSDCMinAdd` / `amountTokenMinAdd`
+- Devuelve excedentes cuando corresponde (refund).
+
+## Contratos y tests
 
 - Contrato principal: [src/swappApp.sol](/home/pablowiker/foundry-study/swapApp/src/swappApp.sol)
 - Token de gobernanza: [src/GovernanceToken.sol](/home/pablowiker/foundry-study/swapApp/src/GovernanceToken.sol)
-- Tests unitarios + fork: [test/SwapApp.t.sol](/home/pablowiker/foundry-study/swapApp/test/SwapApp.t.sol)
+- Interfaces V2: `src/interfaces.sol/`
+- Tests: [test/SwapApp.t.sol](/home/pablowiker/foundry-study/swapApp/test/SwapApp.t.sol)
 
-## Requisitos
+## CI (GitHub Actions)
+
+Workflow: `.github/workflows/test.yml`
+
+- Corre siempre tests unitarios (`SwapAppTest`).
+- Corre tests de fork (`SwapAppForkArbitrumTest`) solo si existe el secret `ARBITRUM_RPC_URL`.
+
+Con esto, el pipeline no falla por falta de infraestructura RPC cuando el secret no esta configurado.
+
+## Setup y comandos utiles
+
+### Requisitos
 
 - Foundry instalado (`forge`, `cast`, `anvil`).
-- Para pruebas de fork: variable `ARBITRUM_RPC_URL`.
-
-## Uso rapido
+- Para tests fork: `ARBITRUM_RPC_URL`.
 
 ### Compilar
 
@@ -54,22 +69,18 @@ Permite hacer swaps de tokens mientras:
 forge build
 ```
 
-### Ejecutar tests unitarios
+### Tests unitarios
 
 ```bash
-forge test -vv
+forge test -vv --match-contract SwapAppTest
 ```
 
-### Ejecutar test de integracion con fork de Arbitrum
+### Tests fork (Arbitrum)
 
 ```bash
-export ARBITRUM_RPC_URL=https://arb1.arbitrum.io/rpc
-forge test --match-test test_fork_swap_on_arbitrum_router --fork-url arbitrum -vv
+export ARBITRUM_RPC_URL="https://arb1.arbitrum.io/rpc"
+forge test -vv --match-contract SwapAppForkArbitrumTest
 ```
-
-Router usado en el test de fork (Arbitrum):
-
-- `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24`
 
 ### Coverage
 
@@ -84,11 +95,15 @@ forge fmt
 forge fmt --check
 ```
 
+## Repositorio
+
+https://github.com/polwiker1/SwapAppStudyFoundry-
+
 ## Nota de seguridad
 
-Este repositorio es un proyecto educativo/prototipo. Antes de usar en produccion se recomienda:
+Proyecto educativo/prototipo. Antes de produccion:
 
 - Auditoria externa.
-- Manejo seguro de ownership (multisig/timelock).
-- Politica operativa para fondeo de rewards.
-- Monitoreo de eventos y parametros on-chain.
+- Ownership seguro (multisig/timelock).
+- Politica de fondeo de rewards.
+- Monitoreo on-chain de eventos y parametros.
