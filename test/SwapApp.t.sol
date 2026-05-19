@@ -15,7 +15,22 @@ contract MockERC20 is ERC20 {
     }
 }
 
+contract MockFactory {
+    mapping(address => mapping(address => address)) public getPair;
+
+    function setPair(address tokenA, address tokenB, address pair) external {
+        getPair[tokenA][tokenB] = pair;
+        getPair[tokenB][tokenA] = pair;
+    }
+}
+
 contract MockRouter {
+    MockERC20 public immutable lpToken;
+
+    constructor(address _lpToken) {
+        lpToken = MockERC20(_lpToken);
+    }
+
     function swapExactTokensForTokens(uint256 amountIn, uint256, address[] calldata path, address to, uint256)
         external
         returns (uint256[] memory amounts)
@@ -37,10 +52,42 @@ contract MockRouter {
         amounts[0] = amountIn;
         amounts[path.length - 1] = amountIn;
     }
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256,
+        uint256,
+        address to,
+        uint256
+    ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
+        MockERC20(tokenA).transferFrom(msg.sender, address(this), amountADesired);
+        MockERC20(tokenB).transferFrom(msg.sender, address(this), amountBDesired);
+
+        amountA = amountADesired;
+        amountB = amountBDesired;
+        liquidity = amountA < amountB ? amountA : amountB;
+        lpToken.mint(to, liquidity);
+    }
+
+    function removeLiquidity(address tokenA, address tokenB, uint256 liquidity, uint256, uint256, address to, uint256)
+        external
+        returns (uint256 amountA, uint256 amountB)
+    {
+        lpToken.transferFrom(msg.sender, address(this), liquidity);
+
+        amountA = liquidity;
+        amountB = liquidity;
+        MockERC20(tokenA).mint(to, amountA);
+        MockERC20(tokenB).mint(to, amountB);
+    }
 }
 
 contract SwapAppForkArbitrumTest is Test {
     address internal constant ARBITRUM_V2_ROUTER = 0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24;
+    address internal constant ARBITRUM_V2_FACTORY = 0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9;
     address internal constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     address internal constant WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
 
@@ -54,7 +101,7 @@ contract SwapAppForkArbitrumTest is Test {
         vm.createSelectFork(vm.envString("ARBITRUM_RPC_URL"));
 
         gov = new GovernanceToken("Governance", "GOV");
-        app = new SwappApp(ARBITRUM_V2_ROUTER, address(gov), treasury, 10, 3000, 1e18);
+        app = new SwappApp(ARBITRUM_V2_ROUTER, ARBITRUM_V2_FACTORY, address(gov), treasury, 10, 3000, 1e18);
         gov.mint(address(app), 1_000_000e18);
 
         deal(USDC, user, 5_000e6);
@@ -82,6 +129,36 @@ contract SwapAppForkArbitrumTest is Test {
         assertGt(ERC20(WETH).balanceOf(user), userWethBefore);
         assertEq(amountOut, ERC20(WETH).balanceOf(user) - userWethBefore);
     }
+
+    function test_fork_add_liquidity_single_token_usdc() external {
+        address[] memory path = new address[](2);
+        path[0] = USDC;
+        path[1] = WETH;
+
+        uint256 amountInUSDC = 1_000e6;
+        uint256 deadline = block.timestamp + 30 minutes;
+
+        SwappApp.AddLiquiditySingleTokenUSDCParams memory p = SwappApp.AddLiquiditySingleTokenUSDCParams({
+            usdc: USDC,
+            tokenOther: WETH,
+            amountInUSDC: amountInUSDC,
+            amountOutMinSwap: 0,
+            amountUSDCMinAdd: 0,
+            amountTokenMinAdd: 0,
+            pathUSDCToTokenOther: path,
+            deadline: deadline
+        });
+
+        address lpToken = MockFactory(ARBITRUM_V2_FACTORY).getPair(USDC, WETH);
+        uint256 lpBefore = ERC20(lpToken).balanceOf(user);
+
+        vm.prank(user);
+        (, , uint256 liquidity) = app.addLiquiditySingleTokenUSDC(p);
+
+        uint256 lpAfter = ERC20(lpToken).balanceOf(user);
+        assertGt(liquidity, 0);
+        assertEq(lpAfter, lpBefore + liquidity);
+    }
 }
 
 contract SwapAppTest is Test {
@@ -89,6 +166,8 @@ contract SwapAppTest is Test {
     MockERC20 tokenB;
     GovernanceToken gov;
     MockRouter router;
+    MockFactory factory;
+    MockERC20 lpToken;
     SwappApp app;
 
     address user = address(0x123);
@@ -97,11 +176,14 @@ contract SwapAppTest is Test {
     function setUp() external {
         tokenA = new MockERC20("Token A", "TKA");
         tokenB = new MockERC20("Token B", "TKB");
+        lpToken = new MockERC20("LP Token", "LP");
         gov = new GovernanceToken("Governance", "GOV");
-        router = new MockRouter();
+        router = new MockRouter(address(lpToken));
+        factory = new MockFactory();
+        factory.setPair(address(tokenA), address(tokenB), address(lpToken));
 
         // 1 fee token value -> 1 GOV token (scaled 1e18)
-        app = new SwappApp(address(router), address(gov), treasury, 10, 3000, 1e18);
+        app = new SwappApp(address(router), address(factory), address(gov), treasury, 10, 3000, 1e18);
 
         tokenA.mint(user, 1_000_000e18);
 
@@ -267,18 +349,103 @@ contract SwapAppTest is Test {
 
     function test_constructor_reverts_on_invalid_params() external {
         vm.expectRevert("router=0");
-        new SwappApp(address(0), address(gov), treasury, 10, 3000, 1e18);
+        new SwappApp(address(0), address(factory), address(gov), treasury, 10, 3000, 1e18);
+
+        vm.expectRevert("factory=0");
+        new SwappApp(address(router), address(0), address(gov), treasury, 10, 3000, 1e18);
 
         vm.expectRevert("gov=0");
-        new SwappApp(address(router), address(0), treasury, 10, 3000, 1e18);
+        new SwappApp(address(router), address(factory), address(0), treasury, 10, 3000, 1e18);
 
         vm.expectRevert("treasury=0");
-        new SwappApp(address(router), address(gov), address(0), 10, 3000, 1e18);
+        new SwappApp(address(router), address(factory), address(gov), address(0), 10, 3000, 1e18);
 
         vm.expectRevert("fee>bsp");
-        new SwappApp(address(router), address(gov), treasury, 10_001, 3000, 1e18);
+        new SwappApp(address(router), address(factory), address(gov), treasury, 10_001, 3000, 1e18);
 
         vm.expectRevert("share>bsp");
-        new SwappApp(address(router), address(gov), treasury, 10, 10_001, 1e18);
+        new SwappApp(address(router), address(factory), address(gov), treasury, 10, 10_001, 1e18);
+    }
+
+    function test_add_liquidity_single_token_usdc_mints_lp_to_user() external {
+        SwappApp.AddLiquiditySingleTokenUSDCParams memory p = SwappApp.AddLiquiditySingleTokenUSDCParams({
+            usdc: address(tokenA),
+            tokenOther: address(tokenB),
+            amountInUSDC: 100e18,
+            amountOutMinSwap: 0,
+            amountUSDCMinAdd: 0,
+            amountTokenMinAdd: 0,
+            pathUSDCToTokenOther: _pathAB(),
+            deadline: block.timestamp + 1
+        });
+
+        uint256 userLpBefore = lpToken.balanceOf(user);
+        vm.prank(user);
+        (uint256 amountUSDCUsed, uint256 amountTokenUsed, uint256 liquidity) = app.addLiquiditySingleTokenUSDC(p);
+
+        assertEq(amountUSDCUsed, 50e18);
+        assertEq(amountTokenUsed, 50e18);
+        assertEq(liquidity, 50e18);
+        assertEq(lpToken.balanceOf(user), userLpBefore + liquidity);
+    }
+
+    function test_add_liquidity_single_token_reverts_when_deadline_expired() external {
+        SwappApp.AddLiquiditySingleTokenUSDCParams memory p = SwappApp.AddLiquiditySingleTokenUSDCParams({
+            usdc: address(tokenA),
+            tokenOther: address(tokenB),
+            amountInUSDC: 100e18,
+            amountOutMinSwap: 0,
+            amountUSDCMinAdd: 0,
+            amountTokenMinAdd: 0,
+            pathUSDCToTokenOther: _pathAB(),
+            deadline: block.timestamp
+        });
+
+        vm.warp(block.timestamp + 1);
+        vm.prank(user);
+        vm.expectRevert("expired");
+        app.addLiquiditySingleTokenUSDC(p);
+    }
+
+    function test_remove_liquidity_to_usdc_returns_single_token_to_user() external {
+        SwappApp.AddLiquiditySingleTokenUSDCParams memory addP = SwappApp.AddLiquiditySingleTokenUSDCParams({
+            usdc: address(tokenA),
+            tokenOther: address(tokenB),
+            amountInUSDC: 100e18,
+            amountOutMinSwap: 0,
+            amountUSDCMinAdd: 0,
+            amountTokenMinAdd: 0,
+            pathUSDCToTokenOther: _pathAB(),
+            deadline: block.timestamp + 1
+        });
+
+        vm.prank(user);
+        (, , uint256 mintedLp) = app.addLiquiditySingleTokenUSDC(addP);
+
+        vm.prank(user);
+        lpToken.approve(address(app), type(uint256).max);
+
+        address[] memory pathBA = new address[](2);
+        pathBA[0] = address(tokenB);
+        pathBA[1] = address(tokenA);
+
+        SwappApp.RemoveLiquidityToUSDCParams memory removeP = SwappApp.RemoveLiquidityToUSDCParams({
+            lpToken: address(lpToken),
+            usdc: address(tokenA),
+            tokenOther: address(tokenB),
+            liquidityToBurn: mintedLp,
+            amountUSDCMinRemove: 0,
+            amountTokenMinRemove: 0,
+            amountOutMinSwap: 0,
+            pathTokenOtherToUSDC: pathBA,
+            deadline: block.timestamp + 1
+        });
+
+        uint256 userUsdcBefore = tokenA.balanceOf(user);
+        vm.prank(user);
+        uint256 totalUSDCOut = app.removeLiquidityToUSDC(removeP);
+
+        assertEq(totalUSDCOut, mintedLp * 2);
+        assertEq(tokenA.balanceOf(user), userUsdcBefore + totalUSDCOut);
     }
 }
