@@ -36,7 +36,9 @@ contract SwappApp is Ownable {
     event FeeParamsUpdated(uint16 feeBps, uint16 rewardShareBps);
     event TreasuryUpdated(address treasury);
     event GovRateUpdated(uint256 govTokensPerFeeToken);
-    event LiquidityAdded(address indexed provider, address tokenA, address tokenB, uint256 amountA, uint256 amountB, uint256 liquidity);
+    event LiquidityAdded(
+        address indexed provider, address tokenA, address tokenB, uint256 amountA, uint256 amountB, uint256 liquidity
+    );
     event LiquidityRemovedToSingleToken(
         address indexed provider, address lpToken, address tokenOut, uint256 liquidityBurned, uint256 amountOut
     );
@@ -167,6 +169,7 @@ contract SwappApp is Ownable {
 
         emit RewardClaimed(msg.sender, claimed);
     }
+
     function addLiquiditySingleTokenUSDC(AddLiquiditySingleTokenUSDCParams calldata p)
         external
         returns (uint256 amountUSDCUsed, uint256 amountTokenUsed, uint256 liquidity)
@@ -214,14 +217,22 @@ contract SwappApp is Ownable {
         IERC20(p.lpToken).safeTransferFrom(msg.sender, address(this), p.liquidityToBurn);
         IERC20(p.lpToken).forceApprove(v2Router02Address, p.liquidityToBurn);
 
-        (uint256 amountUSDCRemoved, uint256 amountTokenRemoved) = IV2Router02(v2Router02Address).removeLiquidity(
-            p.usdc, p.tokenOther, p.liquidityToBurn, p.amountUSDCMinRemove, p.amountTokenMinRemove, address(this), p.deadline
-        );
+        (uint256 amountUSDCRemoved, uint256 amountTokenRemoved) = IV2Router02(v2Router02Address)
+            .removeLiquidity(
+                p.usdc,
+                p.tokenOther,
+                p.liquidityToBurn,
+                p.amountUSDCMinRemove,
+                p.amountTokenMinRemove,
+                address(this),
+                p.deadline
+            );
 
         IERC20(p.tokenOther).forceApprove(v2Router02Address, amountTokenRemoved);
-        uint256[] memory swapOut = IV2Router02(v2Router02Address).swapExactTokensForTokens(
-            amountTokenRemoved, p.amountOutMinSwap, p.pathTokenOtherToUSDC, address(this), p.deadline
-        );
+        uint256[] memory swapOut = IV2Router02(v2Router02Address)
+            .swapExactTokensForTokens(
+                amountTokenRemoved, p.amountOutMinSwap, p.pathTokenOtherToUSDC, address(this), p.deadline
+            );
 
         uint256 usdcFromSwap = swapOut[swapOut.length - 1];
         totalUSDCOut = amountUSDCRemoved + usdcFromSwap;
@@ -238,8 +249,8 @@ contract SwappApp is Ownable {
         uint256 deadline
     ) internal returns (uint256 amountOut) {
         IERC20(tokenIn).forceApprove(v2Router02Address, amountIn);
-        uint256[] memory swapOut =
-            IV2Router02(v2Router02Address).swapExactTokensForTokens(amountIn, amountOutMin, path, address(this), deadline);
+        uint256[] memory swapOut = IV2Router02(v2Router02Address)
+            .swapExactTokensForTokens(amountIn, amountOutMin, path, address(this), deadline);
         amountOut = swapOut[swapOut.length - 1];
     }
 
@@ -254,16 +265,17 @@ contract SwappApp is Ownable {
     ) internal returns (uint256 amountUSDCUsed, uint256 amountTokenUsed, uint256 liquidity) {
         IERC20(usdc).forceApprove(v2Router02Address, usdcForLiquidity);
         IERC20(tokenOther).forceApprove(v2Router02Address, tokenOtherForLiquidity);
-        (amountUSDCUsed, amountTokenUsed, liquidity) = IV2Router02(v2Router02Address).addLiquidity(
-            usdc,
-            tokenOther,
-            usdcForLiquidity,
-            tokenOtherForLiquidity,
-            amountUSDCMinAdd,
-            amountTokenMinAdd,
-            msg.sender,
-            deadline
-        );
+        (amountUSDCUsed, amountTokenUsed, liquidity) = IV2Router02(v2Router02Address)
+            .addLiquidity(
+                usdc,
+                tokenOther,
+                usdcForLiquidity,
+                tokenOtherForLiquidity,
+                amountUSDCMinAdd,
+                amountTokenMinAdd,
+                msg.sender,
+                deadline
+            );
 
         if (usdcForLiquidity > amountUSDCUsed) {
             IERC20(usdc).safeTransfer(msg.sender, usdcForLiquidity - amountUSDCUsed);

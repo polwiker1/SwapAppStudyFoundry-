@@ -35,7 +35,10 @@ jobs:
         run: forge build --sizes
 
       - name: Run Forge unit tests
-        run: forge test -vvv --match-contract SwapAppTest
+        run: |
+          forge test -vvv --match-contract SwapAppTest
+          forge test -vvv --match-contract V3LiquidityStrategyTest
+          forge test -vvv --match-contract V3QuoteHelperTest
 
       - name: Run Forge fork tests
         if: ${{ secrets.ARBITRUM_RPC_URL != '' }}

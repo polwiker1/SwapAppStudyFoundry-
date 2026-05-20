@@ -5,7 +5,12 @@ import {Test} from "../lib/forge-std/src/Test.sol";
 import {ERC20} from "../lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 
 import {SwappApp} from "../src/swappApp.sol";
+import {V3LiquidityStrategy} from "../src/V3LiquidityStrategy.sol";
+import {V3QuoteHelper} from "../src/V3QuoteHelper.sol";
 import {GovernanceToken} from "../src/GovernanceToken.sol";
+import {ISwapRouter02} from "../src/interfaces.sol/ISwapRouter02.sol";
+import {INonfungiblePositionManager} from "../src/interfaces.sol/INonfungiblePositionManager.sol";
+import {IQuoterV2} from "../src/interfaces.sol/IQuoterV2.sol";
 
 contract MockERC20 is ERC20 {
     constructor(string memory n, string memory s) ERC20(n, s) {}
@@ -43,11 +48,7 @@ contract MockRouter {
         amounts[path.length - 1] = amountIn;
     }
 
-    function getAmountsOut(uint256 amountIn, address[] calldata path)
-        external
-        pure
-        returns (uint256[] memory amounts)
-    {
+    function getAmountsOut(uint256 amountIn, address[] calldata path) external pure returns (uint256[] memory amounts) {
         amounts = new uint256[](path.length);
         amounts[0] = amountIn;
         amounts[path.length - 1] = amountIn;
@@ -82,6 +83,83 @@ contract MockRouter {
         amountB = liquidity;
         MockERC20(tokenA).mint(to, amountA);
         MockERC20(tokenB).mint(to, amountB);
+    }
+}
+
+contract MockV3Factory {
+    mapping(bytes32 => address) public pools;
+
+    function setPool(address tokenA, address tokenB, uint24 fee, address pool) external {
+        pools[_poolKey(tokenA, tokenB, fee)] = pool;
+    }
+
+    function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool) {
+        pool = pools[_poolKey(tokenA, tokenB, fee)];
+    }
+
+    function _poolKey(address tokenA, address tokenB, uint24 fee) internal pure returns (bytes32) {
+        (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        return keccak256(abi.encode(token0, token1, fee));
+    }
+}
+
+contract MockSwapRouter02 {
+    function exactInputSingle(ISwapRouter02.ExactInputSingleParams calldata params)
+        external
+        returns (uint256 amountOut)
+    {
+        require(block.timestamp <= params.deadline, "router expired");
+        require(params.amountIn >= params.amountOutMinimum, "too little received");
+
+        MockERC20(params.tokenIn).transferFrom(msg.sender, address(this), params.amountIn);
+        amountOut = params.amountIn;
+        MockERC20(params.tokenOut).mint(params.recipient, amountOut);
+    }
+}
+
+contract MockNonfungiblePositionManager {
+    uint256 public nextTokenId = 1;
+    mapping(uint256 => address) public ownerOf;
+
+    function mint(INonfungiblePositionManager.MintParams calldata params)
+        external
+        returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
+    {
+        require(block.timestamp <= params.deadline, "mint expired");
+        require(params.tickLower < params.tickUpper, "bad ticks");
+
+        MockERC20(params.token0).transferFrom(msg.sender, address(this), params.amount0Desired);
+        MockERC20(params.token1).transferFrom(msg.sender, address(this), params.amount1Desired);
+
+        amount0 = params.amount0Desired;
+        amount1 = params.amount1Desired;
+        require(amount0 >= params.amount0Min && amount1 >= params.amount1Min, "mint min");
+
+        liquidity = uint128(amount0 < amount1 ? amount0 : amount1);
+        tokenId = nextTokenId++;
+        ownerOf[tokenId] = params.recipient;
+    }
+}
+
+contract MockQuoterV2 {
+    uint256 public quoteAmountOut = 50e18;
+    uint160 public quoteSqrtPriceX96After = 1 << 96;
+    uint32 public quoteInitializedTicksCrossed = 12;
+    uint256 public quoteGasEstimate = 120_000;
+
+    function setQuote(uint256 amountOut) external {
+        quoteAmountOut = amountOut;
+    }
+
+    function quoteExactInputSingle(IQuoterV2.QuoteExactInputSingleParams memory)
+        external
+        view
+        returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)
+    {
+        amountOut = quoteAmountOut;
+        sqrtPriceX96After = quoteSqrtPriceX96After;
+        initializedTicksCrossed = quoteInitializedTicksCrossed;
+        gasEstimate = quoteGasEstimate;
     }
 }
 
@@ -153,7 +231,7 @@ contract SwapAppForkArbitrumTest is Test {
         uint256 lpBefore = ERC20(lpToken).balanceOf(user);
 
         vm.prank(user);
-        (, , uint256 liquidity) = app.addLiquiditySingleTokenUSDC(p);
+        (,, uint256 liquidity) = app.addLiquiditySingleTokenUSDC(p);
 
         uint256 lpAfter = ERC20(lpToken).balanceOf(user);
         assertGt(liquidity, 0);
@@ -420,7 +498,7 @@ contract SwapAppTest is Test {
         });
 
         vm.prank(user);
-        (, , uint256 mintedLp) = app.addLiquiditySingleTokenUSDC(addP);
+        (,, uint256 mintedLp) = app.addLiquiditySingleTokenUSDC(addP);
 
         vm.prank(user);
         lpToken.approve(address(app), type(uint256).max);
@@ -447,5 +525,165 @@ contract SwapAppTest is Test {
 
         assertEq(totalUSDCOut, mintedLp * 2);
         assertEq(tokenA.balanceOf(user), userUsdcBefore + totalUSDCOut);
+    }
+}
+
+contract V3LiquidityStrategyTest is Test {
+    MockERC20 usdc;
+    MockERC20 weth;
+    MockV3Factory factory;
+    MockSwapRouter02 router;
+    MockNonfungiblePositionManager positionManager;
+    V3LiquidityStrategy strategy;
+
+    address user = address(0x456);
+    uint24 fee = 3000;
+
+    function setUp() external {
+        usdc = new MockERC20("USD Coin", "USDC");
+        weth = new MockERC20("Wrapped Ether", "WETH");
+        factory = new MockV3Factory();
+        router = new MockSwapRouter02();
+        positionManager = new MockNonfungiblePositionManager();
+        strategy = new V3LiquidityStrategy(address(factory), address(router), address(positionManager));
+
+        factory.setPool(address(usdc), address(weth), fee, address(0x1000));
+        usdc.mint(user, 10_000e18);
+
+        vm.prank(user);
+        usdc.approve(address(strategy), type(uint256).max);
+    }
+
+    function test_add_liquidity_single_token_usdc_v3_mints_position_to_user() external {
+        V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params memory p =
+            V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params({
+                usdc: address(usdc),
+                tokenOther: address(weth),
+                fee: fee,
+                tickLower: -887_220,
+                tickUpper: 887_220,
+                amountInUSDC: 100e18,
+                amountOutMinSwap: 0,
+                amountUSDCMinMint: 0,
+                amountTokenMinMint: 0,
+                sqrtPriceLimitX96: 0,
+                deadline: block.timestamp + 1
+            });
+
+        vm.prank(user);
+        (
+            uint256 tokenId,
+            uint128 liquidity,
+            uint256 amountUSDCUsed,
+            uint256 amountTokenUsed,
+            uint256 tokenOtherReceived
+        ) = strategy.addLiquiditySingleTokenUSDCV3(p);
+
+        assertEq(tokenId, 1);
+        assertEq(positionManager.ownerOf(tokenId), user);
+        assertEq(liquidity, 50e18);
+        assertEq(amountUSDCUsed, 50e18);
+        assertEq(amountTokenUsed, 50e18);
+        assertEq(tokenOtherReceived, 50e18);
+    }
+
+    function test_add_liquidity_single_token_usdc_v3_reverts_when_pool_missing() external {
+        V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params memory p =
+            V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params({
+                usdc: address(usdc),
+                tokenOther: address(weth),
+                fee: 500,
+                tickLower: -887_220,
+                tickUpper: 887_220,
+                amountInUSDC: 100e18,
+                amountOutMinSwap: 0,
+                amountUSDCMinMint: 0,
+                amountTokenMinMint: 0,
+                sqrtPriceLimitX96: 0,
+                deadline: block.timestamp + 1
+            });
+
+        vm.prank(user);
+        vm.expectRevert("pool not found");
+        strategy.addLiquiditySingleTokenUSDCV3(p);
+    }
+
+    function test_add_liquidity_single_token_usdc_v3_reverts_when_swap_min_is_too_high() external {
+        V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params memory p =
+            V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params({
+                usdc: address(usdc),
+                tokenOther: address(weth),
+                fee: fee,
+                tickLower: -887_220,
+                tickUpper: 887_220,
+                amountInUSDC: 100e18,
+                amountOutMinSwap: 51e18,
+                amountUSDCMinMint: 0,
+                amountTokenMinMint: 0,
+                sqrtPriceLimitX96: 0,
+                deadline: block.timestamp + 1
+            });
+
+        vm.prank(user);
+        vm.expectRevert("too little received");
+        strategy.addLiquiditySingleTokenUSDCV3(p);
+    }
+}
+
+contract V3QuoteHelperTest is Test {
+    MockERC20 usdc;
+    MockERC20 weth;
+    MockQuoterV2 quoter;
+    V3QuoteHelper helper;
+
+    uint24 fee = 3000;
+
+    function setUp() external {
+        usdc = new MockERC20("USD Coin", "USDC");
+        weth = new MockERC20("Wrapped Ether", "WETH");
+        quoter = new MockQuoterV2();
+        helper = new V3QuoteHelper(address(quoter));
+    }
+
+    function test_preview_single_token_usdc_v3_calculates_minimums_from_slippage() external {
+        V3QuoteHelper.SingleTokenV3Preview memory preview = helper.previewSingleTokenUSDCV3(
+            V3QuoteHelper.SingleTokenV3PreviewParams({
+                usdc: address(usdc),
+                tokenOther: address(weth),
+                fee: fee,
+                amountInUSDC: 100e18,
+                slippageBps: 100,
+                sqrtPriceLimitX96: 0
+            })
+        );
+
+        assertEq(preview.amountToSwap, 50e18);
+        assertEq(preview.usdcForLiquidity, 50e18);
+        assertEq(preview.expectedTokenOther, 50e18);
+        assertEq(preview.amountOutMinSwap, 49.5e18);
+        assertEq(preview.amountUSDCMinMint, 49.5e18);
+        assertEq(preview.amountTokenMinMint, 49.5e18);
+        assertEq(preview.sqrtPriceX96After, 1 << 96);
+        assertEq(preview.initializedTicksCrossed, 12);
+        assertEq(preview.gasEstimate, 120_000);
+    }
+
+    function test_preview_single_token_usdc_v3_reverts_when_slippage_is_too_high() external {
+        vm.expectRevert("slippage>bsp");
+        helper.previewSingleTokenUSDCV3(
+            V3QuoteHelper.SingleTokenV3PreviewParams({
+                usdc: address(usdc),
+                tokenOther: address(weth),
+                fee: fee,
+                amountInUSDC: 100e18,
+                slippageBps: 10_001,
+                sqrtPriceLimitX96: 0
+            })
+        );
+    }
+
+    function test_constructor_reverts_when_quoter_is_zero() external {
+        vm.expectRevert("quoter=0");
+        new V3QuoteHelper(address(0));
     }
 }
