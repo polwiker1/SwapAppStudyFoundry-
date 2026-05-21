@@ -7,6 +7,7 @@
 - Swap ERC-20 con fee de protocolo y rewards en token de gobernanza.
 - Liquidez V2 desde un solo token (`USDC -> swap parcial -> add liquidity`).
 - Estrategia V3 para crear posiciones de liquidez concentrada desde USDC.
+- Salida V3 guiada para reducir liquidez, colectar tokens y volver a USDC.
 - Helper de quotes V3 para calcular minimos por slippage.
 - Helper de rangos V3 para traducir exposicion `Low / Medium / High` a `tickLower / tickUpper`.
 - Helper de limite de precio V3 para sugerir `sqrtPriceLimitX96` y evitar usar `0` en produccion.
@@ -46,6 +47,16 @@ Flujo buscado:
 - [script/CheckBalances.s.sol](/home/pablowiker/foundry-study/swapApp/script/CheckBalances.s.sol): consulta balances de ETH/USDC/WETH.
 - [ops/REAL_TEST_RUNBOOK.md](/home/pablowiker/foundry-study/swapApp/ops/REAL_TEST_RUNBOOK.md): checklist y bitacora para prueba real.
 
+## Treasury
+
+`SwappApp` y `V3LiquidityStrategy` tienen treasury configurado por separado. Para esta etapa, la regla operativa es deployar ambos usando la misma address de treasury.
+
+Esto mantiene la contabilidad simple:
+
+- `SwappApp.treasury`: fees de swaps y salida guiada V2.
+- `V3LiquidityStrategy.treasury`: fee del 1% en salida V3.
+- Ambos deben apuntar al mismo destino operativo.
+
 ## Protecciones de Ejecucion
 
 - `amountOutMinSwap`: revierte si el swap recibe menos de lo aceptado.
@@ -55,8 +66,50 @@ Flujo buscado:
 - `V3QuoteHelper`: sugiere minimos desde quote + slippage.
 - `V3RangeHelper`: evita rangos/ticks incoherentes.
 - `V3PriceLimitHelper`: sugiere limite de precio para no usar `0` en produccion.
+- Salida V2 cobra `3.5%` sobre el USDC total de salida y lo envia a `treasury`.
+- Salida V3 cobra `1%` sobre el USDC total de salida y lo envia a `treasury`.
 
 Nota: para ejecucion real sensible, conviene sumar RPC protegido/MEV protection desde la wallet o frontend.
+
+## Entrada Y Salida V3
+
+Entrada:
+
+- El usuario aprueba USDC al contrato `V3LiquidityStrategy`.
+- El contrato swappea una parte a `tokenOther`.
+- El contrato mintea la posicion V3.
+- El NFT queda directamente en la wallet del usuario (`recipient = msg.sender`).
+
+Salida guiada:
+
+- El usuario debe aprobar su NFT V3 al contrato `V3LiquidityStrategy`.
+- El contrato llama `decreaseLiquidity(...)`.
+- El contrato llama `collect(...)` hacia si mismo.
+- El contrato swappea `tokenOther` a USDC.
+- El contrato cobra `1%` de execution/strategy fee sobre `totalUSDCOut`.
+- El contrato envia la fee a `treasury`.
+- El contrato devuelve el USDC neto al usuario.
+- Si `burnIfEmpty = true` y la liquidez queda en cero, intenta quemar el NFT.
+
+Owner/treasury no pueden retirar liquidez del usuario porque el NFT pertenece al usuario. La estrategia solo puede operar el NFT si el usuario la aprueba.
+
+## Entrada Y Salida V2
+
+Entrada:
+
+- El usuario aprueba USDC al contrato `SwappApp`.
+- El contrato swappea una parte a `tokenOther`.
+- El contrato agrega liquidez en Uniswap V2.
+- Los LP tokens quedan directamente en la wallet del usuario.
+
+Salida guiada:
+
+- El usuario aprueba sus LP tokens V2 al contrato `SwappApp`.
+- El contrato retira la liquidez.
+- El contrato swappea `tokenOther` a USDC.
+- El contrato cobra `3.5%` de strategy fee sobre `totalUSDCOut`.
+- El contrato envia la fee a `treasury`.
+- El contrato devuelve el USDC neto al usuario.
 
 ## Comandos
 

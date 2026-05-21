@@ -29,6 +29,8 @@ Validar con USDC real bajo que el flujo es operable end-to-end en Arbitrum:
 - retirar liquidez V2 hacia USDC
 - agregar liquidez V3 desde USDC con exposicion `Low`
 - confirmar NFT de posicion V3
+- aprobar el NFT V3 al contrato antes de salida guiada
+- retirar liquidez V3 hacia USDC
 - colectar fees cuando haya actividad
 - registrar gas, refunds, balances y fricciones
 
@@ -65,12 +67,16 @@ Registrar balances antes y despues de cada operacion.
 - `forge build --sizes` pasa.
 - Unit tests pasan.
 - Fork test principal pasa.
+- `SwappApp` y `V3LiquidityStrategy` usan la misma treasury address.
 - Wallet tiene monto chico de USDC.
 - Wallet tiene ETH suficiente para gas en Arbitrum.
 - Se entiende allowance/approval antes de firmar.
 - `amountOutMinSwap` viene de quote.
 - `tickLower/tickUpper` vienen de `V3RangeHelper` con `Low`.
 - `sqrtPriceLimitX96` viene de `V3PriceLimitHelper`, no `0`.
+- Salida V2 cobra `3.5%` sobre `totalUSDCOut` y lo envia a treasury.
+- Salida V3 cobra `1%` sobre `totalUSDCOut` y lo envia a treasury.
+- Para salida V3 guiada, el NFT debe estar aprobado al contrato de estrategia.
 - Deadline razonable: corto pero usable.
 - Si existe RPC protegido, usarlo para ejecucion.
 
@@ -145,7 +151,9 @@ Notes:
 LP burned:
 Tx hash:
 Gas:
-USDC returned:
+Total USDC out:
+Treasury fee USDC:
+User USDC returned:
 Notes:
 
 ## V3 Add Liquidity
@@ -166,6 +174,21 @@ Tx hash:
 Gas:
 amount0 collected:
 amount1 collected:
+Notes:
+
+## V3 Remove Liquidity To USDC
+
+NFT approval tx hash:
+Remove tx hash:
+Gas:
+Liquidity removed:
+USDC collected:
+Token collected:
+Total USDC out:
+Exit fee USDC:
+User USDC out:
+Treasury:
+Burned NFT:
 Notes:
 
 ## Ending Balances

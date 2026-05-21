@@ -33,5 +33,7 @@ interface ISwappApp {
         uint256 deadline
     ) external returns (uint256 amountUSDCUsed, uint256 amountTokenUsed, uint256 liquidity);
 
-    function removeLiquidityToUSDC(RemoveLiquidityToUSDCParams calldata p) external returns (uint256 totalUSDCOut);
+    function removeLiquidityToUSDC(RemoveLiquidityToUSDCParams calldata p)
+        external
+        returns (uint256 totalUSDCOut, uint256 feeUSDC, uint256 userUSDCOut);
 }

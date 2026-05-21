@@ -11,6 +11,7 @@ contract SwappApp is Ownable {
     using SafeERC20 for IERC20;
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
+    uint16 public constant V2_EXIT_FEE_BPS = 350; // 3.5%
 
     address public immutable v2Router02Address;
     address public immutable v2FactoryAddress;
@@ -40,7 +41,13 @@ contract SwappApp is Ownable {
         address indexed provider, address tokenA, address tokenB, uint256 amountA, uint256 amountB, uint256 liquidity
     );
     event LiquidityRemovedToSingleToken(
-        address indexed provider, address lpToken, address tokenOut, uint256 liquidityBurned, uint256 amountOut
+        address indexed provider,
+        address lpToken,
+        address tokenOut,
+        uint256 liquidityBurned,
+        uint256 totalAmountOut,
+        uint256 feeAmount,
+        uint256 userAmountOut
     );
 
     struct RemoveLiquidityToUSDCParams {
@@ -204,7 +211,10 @@ contract SwappApp is Ownable {
         emit LiquidityAdded(msg.sender, p.usdc, p.tokenOther, amountUSDCUsed, amountTokenUsed, liquidity);
     }
 
-    function removeLiquidityToUSDC(RemoveLiquidityToUSDCParams calldata p) external returns (uint256 totalUSDCOut) {
+    function removeLiquidityToUSDC(RemoveLiquidityToUSDCParams calldata p)
+        external
+        returns (uint256 totalUSDCOut, uint256 feeUSDC, uint256 userUSDCOut)
+    {
         require(block.timestamp <= p.deadline, "expired");
         require(p.lpToken != address(0) && p.usdc != address(0) && p.tokenOther != address(0), "token=0");
         require(p.usdc != p.tokenOther, "same token");
@@ -236,9 +246,18 @@ contract SwappApp is Ownable {
 
         uint256 usdcFromSwap = swapOut[swapOut.length - 1];
         totalUSDCOut = amountUSDCRemoved + usdcFromSwap;
-        IERC20(p.usdc).safeTransfer(msg.sender, totalUSDCOut);
+        feeUSDC = (totalUSDCOut * V2_EXIT_FEE_BPS) / BPS_DENOMINATOR;
+        userUSDCOut = totalUSDCOut - feeUSDC;
 
-        emit LiquidityRemovedToSingleToken(msg.sender, p.lpToken, p.usdc, p.liquidityToBurn, totalUSDCOut);
+        if (feeUSDC > 0) {
+            IERC20(p.usdc).safeTransfer(treasury, feeUSDC);
+        }
+
+        IERC20(p.usdc).safeTransfer(msg.sender, userUSDCOut);
+
+        emit LiquidityRemovedToSingleToken(
+            msg.sender, p.lpToken, p.usdc, p.liquidityToBurn, totalUSDCOut, feeUSDC, userUSDCOut
+        );
     }
 
     function _swapExactToContract(

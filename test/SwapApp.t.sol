@@ -119,8 +119,18 @@ contract MockSwapRouter02 {
 }
 
 contract MockNonfungiblePositionManager {
+    struct MockPosition {
+        address token0;
+        address token1;
+        uint24 fee;
+        uint128 liquidity;
+        uint128 tokensOwed0;
+        uint128 tokensOwed1;
+    }
+
     uint256 public nextTokenId = 1;
     mapping(uint256 => address) public ownerOf;
+    mapping(uint256 => MockPosition) internal positionById;
 
     function mint(INonfungiblePositionManager.MintParams calldata params)
         external
@@ -139,6 +149,88 @@ contract MockNonfungiblePositionManager {
         liquidity = uint128(amount0 < amount1 ? amount0 : amount1);
         tokenId = nextTokenId++;
         ownerOf[tokenId] = params.recipient;
+        positionById[tokenId] = MockPosition({
+            token0: params.token0,
+            token1: params.token1,
+            fee: params.fee,
+            liquidity: liquidity,
+            tokensOwed0: 0,
+            tokensOwed1: 0
+        });
+    }
+
+    function decreaseLiquidity(INonfungiblePositionManager.DecreaseLiquidityParams calldata params)
+        external
+        returns (uint256 amount0, uint256 amount1)
+    {
+        MockPosition storage position = positionById[params.tokenId];
+        require(block.timestamp <= params.deadline, "decrease expired");
+        require(position.liquidity >= params.liquidity, "liquidity too high");
+
+        amount0 = params.liquidity;
+        amount1 = params.liquidity;
+        require(amount0 >= params.amount0Min && amount1 >= params.amount1Min, "decrease min");
+
+        position.liquidity -= params.liquidity;
+        position.tokensOwed0 += uint128(amount0);
+        position.tokensOwed1 += uint128(amount1);
+    }
+
+    function collect(INonfungiblePositionManager.CollectParams calldata params)
+        external
+        returns (uint256 amount0, uint256 amount1)
+    {
+        MockPosition storage position = positionById[params.tokenId];
+        amount0 = position.tokensOwed0;
+        amount1 = position.tokensOwed1;
+
+        if (amount0 > params.amount0Max) amount0 = params.amount0Max;
+        if (amount1 > params.amount1Max) amount1 = params.amount1Max;
+
+        position.tokensOwed0 -= uint128(amount0);
+        position.tokensOwed1 -= uint128(amount1);
+
+        if (amount0 > 0) MockERC20(position.token0).transfer(params.recipient, amount0);
+        if (amount1 > 0) MockERC20(position.token1).transfer(params.recipient, amount1);
+    }
+
+    function burn(uint256 tokenId) external {
+        require(positionById[tokenId].liquidity == 0, "not cleared");
+        delete positionById[tokenId];
+        delete ownerOf[tokenId];
+    }
+
+    function positions(uint256 tokenId)
+        external
+        view
+        returns (
+            uint96 nonce,
+            address operator,
+            address token0,
+            address token1,
+            uint24 fee_,
+            int24 tickLower,
+            int24 tickUpper,
+            uint128 liquidity,
+            uint256 feeGrowthInside0LastX128,
+            uint256 feeGrowthInside1LastX128,
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        )
+    {
+        MockPosition memory position = positionById[tokenId];
+        nonce = 0;
+        operator = address(0);
+        token0 = position.token0;
+        token1 = position.token1;
+        fee_ = position.fee;
+        tickLower = 0;
+        tickUpper = 0;
+        liquidity = position.liquidity;
+        feeGrowthInside0LastX128 = 0;
+        feeGrowthInside1LastX128 = 0;
+        tokensOwed0 = position.tokensOwed0;
+        tokensOwed1 = position.tokensOwed1;
     }
 }
 
@@ -225,8 +317,9 @@ contract SwapAppForkArbitrumTest is Test {
 
         gov = new GovernanceToken("Governance", "GOV");
         app = new SwappApp(ARBITRUM_V2_ROUTER, ARBITRUM_V2_FACTORY, address(gov), treasury, 10, 3000, 1e18);
-        v3Strategy =
-            new V3LiquidityStrategy(ARBITRUM_V3_FACTORY, ARBITRUM_SWAP_ROUTER02, ARBITRUM_NONFUNGIBLE_POSITION_MANAGER);
+        v3Strategy = new V3LiquidityStrategy(
+            ARBITRUM_V3_FACTORY, ARBITRUM_SWAP_ROUTER02, ARBITRUM_NONFUNGIBLE_POSITION_MANAGER, treasury
+        );
         gov.mint(address(app), 1_000_000e18);
 
         deal(USDC, user, 5_000e6);
@@ -638,11 +731,15 @@ contract SwapAppTest is Test {
         });
 
         uint256 userUsdcBefore = tokenA.balanceOf(user);
+        uint256 treasuryUsdcBefore = tokenA.balanceOf(treasury);
         vm.prank(user);
-        uint256 totalUSDCOut = app.removeLiquidityToUSDC(removeP);
+        (uint256 totalUSDCOut, uint256 feeUSDC, uint256 userUSDCOut) = app.removeLiquidityToUSDC(removeP);
 
         assertEq(totalUSDCOut, mintedLp * 2);
-        assertEq(tokenA.balanceOf(user), userUsdcBefore + totalUSDCOut);
+        assertEq(feeUSDC, (totalUSDCOut * app.V2_EXIT_FEE_BPS()) / app.BPS_DENOMINATOR());
+        assertEq(userUSDCOut, totalUSDCOut - feeUSDC);
+        assertEq(tokenA.balanceOf(treasury), treasuryUsdcBefore + feeUSDC);
+        assertEq(tokenA.balanceOf(user), userUsdcBefore + userUSDCOut);
     }
 }
 
@@ -655,6 +752,7 @@ contract V3LiquidityStrategyTest is Test {
     V3LiquidityStrategy strategy;
 
     address user = address(0x456);
+    address treasury = address(0x789);
     uint24 fee = 3000;
 
     function setUp() external {
@@ -663,7 +761,7 @@ contract V3LiquidityStrategyTest is Test {
         factory = new MockV3Factory();
         router = new MockSwapRouter02();
         positionManager = new MockNonfungiblePositionManager();
-        strategy = new V3LiquidityStrategy(address(factory), address(router), address(positionManager));
+        strategy = new V3LiquidityStrategy(address(factory), address(router), address(positionManager), treasury);
 
         factory.setPool(address(usdc), address(weth), fee, address(0x1000));
         usdc.mint(user, 10_000e18);
@@ -745,6 +843,61 @@ contract V3LiquidityStrategyTest is Test {
         vm.prank(user);
         vm.expectRevert("too little received");
         strategy.addLiquiditySingleTokenUSDCV3(p);
+    }
+
+    function test_remove_liquidity_v3_to_usdc_returns_single_token_to_user() external {
+        V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params memory addP =
+            V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params({
+                usdc: address(usdc),
+                tokenOther: address(weth),
+                fee: fee,
+                tickLower: -887_220,
+                tickUpper: 887_220,
+                amountInUSDC: 100e18,
+                amountOutMinSwap: 0,
+                amountUSDCMinMint: 0,
+                amountTokenMinMint: 0,
+                sqrtPriceLimitX96: 0,
+                deadline: block.timestamp + 1
+            });
+
+        vm.prank(user);
+        (uint256 tokenId, uint128 liquidity,,,) = strategy.addLiquiditySingleTokenUSDCV3(addP);
+
+        uint256 userUsdcBefore = usdc.balanceOf(user);
+
+        V3LiquidityStrategy.RemoveLiquidityV3ToUSDCParams memory removeP =
+            V3LiquidityStrategy.RemoveLiquidityV3ToUSDCParams({
+                tokenId: tokenId,
+                usdc: address(usdc),
+                tokenOther: address(weth),
+                fee: fee,
+                liquidity: liquidity,
+                amount0MinDecrease: 0,
+                amount1MinDecrease: 0,
+                amountOutMinSwap: 0,
+                sqrtPriceLimitX96: 0,
+                deadline: block.timestamp + 1,
+                burnIfEmpty: true
+            });
+
+        vm.prank(user);
+        (
+            uint256 totalUSDCOut,
+            uint256 feeUSDC,
+            uint256 userUSDCOut,
+            uint256 amountUSDCCollected,
+            uint256 amountTokenCollected
+        ) = strategy.removeLiquidityV3ToUSDC(removeP);
+
+        assertEq(totalUSDCOut, 100e18);
+        assertEq(feeUSDC, 1e18);
+        assertEq(userUSDCOut, 99e18);
+        assertEq(amountUSDCCollected, 50e18);
+        assertEq(amountTokenCollected, 50e18);
+        assertEq(usdc.balanceOf(user), userUsdcBefore + userUSDCOut);
+        assertEq(usdc.balanceOf(treasury), feeUSDC);
+        assertEq(positionManager.ownerOf(tokenId), address(0));
     }
 }
 
