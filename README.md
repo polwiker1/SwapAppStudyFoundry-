@@ -1,113 +1,113 @@
 # SwapApp (Foundry)
 
-`SwapApp` es un smart contract DeFi sobre Foundry que integra routers tipo Uniswap para resolver flujos de entrada, swap y provision de liquidez:
+`SwapApp` es un modulo DeFi educativo/prototipo sobre Foundry. El objetivo es simplificar operaciones de swap y provision de liquidez desde una entrada simple en USDC, con foco en integracion futura dentro de Zum Pay.
 
-- Swaps con fee de protocolo y rewards en token de gobernanza.
-- Provision de liquidez V2 partiendo de un solo token (USDC) en una sola operacion.
-- Primera estrategia V3 para crear posiciones de liquidez concentrada desde USDC.
-- Helper de quotes V3 para calcular salida esperada y minimos por slippage antes de ejecutar.
+## Estado Actual
 
-## Propuesta de valor
+- Swap ERC-20 con fee de protocolo y rewards en token de gobernanza.
+- Liquidez V2 desde un solo token (`USDC -> swap parcial -> add liquidity`).
+- Estrategia V3 para crear posiciones de liquidez concentrada desde USDC.
+- Helper de quotes V3 para calcular minimos por slippage.
+- Helper de rangos V3 para traducir exposicion `Low / Medium / High` a `tickLower / tickUpper`.
+- Helper de limite de precio V3 para sugerir `sqrtPriceLimitX96` y evitar usar `0` en produccion.
+- Fork test V3 que valida posicion activa y cobro de fees despues de swaps.
+- Runbook para prueba real controlada en Arbitrum.
 
-El objetivo es simplificar una operatoria financiera que suele ser manual:
+## Idea de Producto
 
-1. Entrar con USDC.
-2. Convertir automaticamente una parte al token par via `path`.
-3. Agregar liquidez al pool.
-4. Recibir LP tokens en V2 o una posicion NFT en V3 para participar proporcionalmente de las comisiones del pool.
+El usuario no deberia tener que entender rutas, ticks, fee tiers o liquidez concentrada para operar.
 
-Esto reduce friccion operativa y errores manuales en procesos DeFi.
+Flujo buscado:
 
-## Flujos implementados
+1. Entra con USDC.
+2. Elige V2 simple o V3 concentrada.
+3. En V3 elige perfil de exposicion: `Low`, `Medium` o `High`.
+4. La app calcula quote, rango, minimos y limite de precio.
+5. El usuario firma una operacion con condiciones claras.
 
-### 1) `swapTokens(...)`
+## Arquitectura
 
-- Cobra fee configurable (`feeBps`).
-- Envia fee a `treasury`.
-- Calcula y paga reward en token GOV segun:
-- `rewardShareBps`
-- `govTokensPerFeeToken`
-- Si no hay GOV suficiente, registra saldo pendiente en `pendingGovRewards`.
+### Core
 
-### 2) `addLiquiditySingleTokenUSDC(...)`
+- [src/swappApp.sol](/home/pablowiker/foundry-study/swapApp/src/swappApp.sol): swaps, rewards, add/remove liquidity V2.
+- [src/GovernanceToken.sol](/home/pablowiker/foundry-study/swapApp/src/GovernanceToken.sol): token GOV usado en rewards.
 
-- Recibe USDC desde el usuario.
-- Divide monto 50/50:
-- una parte se swapea a `tokenOther`
-- la otra queda en USDC
-- Agrega liquidez al par `USDC/tokenOther`.
-- Aplica protecciones de ejecucion:
-- `deadline`
-- `amountOutMinSwap`
-- `amountUSDCMinAdd` / `amountTokenMinAdd`
-- Devuelve excedentes cuando corresponde (refund).
+### V3
 
-### 3) `V3LiquidityStrategy.addLiquiditySingleTokenUSDCV3(...)`
+- [src/V3LiquidityStrategy.sol](/home/pablowiker/foundry-study/swapApp/src/V3LiquidityStrategy.sol): ejecuta el flujo V3 desde USDC.
+- [src/V3QuoteHelper.sol](/home/pablowiker/foundry-study/swapApp/src/V3QuoteHelper.sol): estima salida esperada y minimos por slippage.
+- [src/V3RangeHelper.sol](/home/pablowiker/foundry-study/swapApp/src/V3RangeHelper.sol): calcula rangos por perfil de exposicion.
+- [src/V3PriceLimitHelper.sol](/home/pablowiker/foundry-study/swapApp/src/V3PriceLimitHelper.sol): calcula `sqrtPriceLimitX96` sugerido.
+- [src/libraries/TickMath.sol](/home/pablowiker/foundry-study/swapApp/src/libraries/TickMath.sol): matematica V3 para convertir tick a sqrt price.
 
-- Recibe USDC desde el usuario.
-- Valida que exista el pool V3 para `USDC/tokenOther/fee`.
-- Swappea una parte por `tokenOther` usando `SwapRouter02`.
-- Crea una posicion V3 con `NonfungiblePositionManager`.
-- Permite definir `tickLower` y `tickUpper` para liquidez concentrada.
-- Devuelve excedentes cuando el mint no usa el 100% de los tokens.
+### Operacion
 
-### 4) `V3QuoteHelper.previewSingleTokenUSDCV3(...)`
+- [.env.example](/home/pablowiker/foundry-study/swapApp/.env.example): variables no sensibles y direcciones criticas.
+- [script/CheckBalances.s.sol](/home/pablowiker/foundry-study/swapApp/script/CheckBalances.s.sol): consulta balances de ETH/USDC/WETH.
+- [ops/REAL_TEST_RUNBOOK.md](/home/pablowiker/foundry-study/swapApp/ops/REAL_TEST_RUNBOOK.md): checklist y bitacora para prueba real.
 
-- Consulta `QuoterV2` para estimar cuanto `tokenOther` se recibe al swapear parte del USDC.
-- Calcula `amountOutMinSwap` aplicando `slippageBps`.
-- Calcula minimos iniciales para el mint V3 (`amountUSDCMinMint` y `amountTokenMinMint`).
-- Devuelve datos utiles para preview: quote esperado, precio posterior, ticks cruzados y gas estimado.
+## Protecciones de Ejecucion
 
-## Contratos y tests
+- `amountOutMinSwap`: revierte si el swap recibe menos de lo aceptado.
+- `amountUSDCMinMint` / `amountTokenMinMint`: revierte si el mint V3 queda fuera de minimos.
+- `sqrtPriceLimitX96`: limita el precio cruzado por el swap V3.
+- `deadline`: evita ejecucion tardia.
+- `V3QuoteHelper`: sugiere minimos desde quote + slippage.
+- `V3RangeHelper`: evita rangos/ticks incoherentes.
+- `V3PriceLimitHelper`: sugiere limite de precio para no usar `0` en produccion.
 
-- Contrato principal: [src/swappApp.sol](/home/pablowiker/foundry-study/swapApp/src/swappApp.sol)
-- Estrategia V3: [src/V3LiquidityStrategy.sol](/home/pablowiker/foundry-study/swapApp/src/V3LiquidityStrategy.sol)
-- Helper de quotes V3: [src/V3QuoteHelper.sol](/home/pablowiker/foundry-study/swapApp/src/V3QuoteHelper.sol)
-- Token de gobernanza: [src/GovernanceToken.sol](/home/pablowiker/foundry-study/swapApp/src/GovernanceToken.sol)
-- Interfaces V2/V3: `src/interfaces.sol/`
-- Tests: [test/SwapApp.t.sol](/home/pablowiker/foundry-study/swapApp/test/SwapApp.t.sol)
+Nota: para ejecucion real sensible, conviene sumar RPC protegido/MEV protection desde la wallet o frontend.
 
-## CI (GitHub Actions)
+## Comandos
 
-Workflow: `.github/workflows/test.yml`
-
-- Corre siempre tests unitarios (`SwapAppTest`, `V3LiquidityStrategyTest` y `V3QuoteHelperTest`).
-- Corre tests de fork (`SwapAppForkArbitrumTest`) solo si existe el secret `ARBITRUM_RPC_URL`.
-
-Con esto, el pipeline no falla por falta de infraestructura RPC cuando el secret no esta configurado.
-
-## Setup y comandos utiles
-
-### Requisitos
-
-- Foundry instalado (`forge`, `cast`, `anvil`).
-- Para tests fork: `ARBITRUM_RPC_URL`.
-
-### Compilar
+### Setup
 
 ```bash
-forge build
+cp .env.example .env
 ```
 
-### Tests unitarios
+Editar `.env` localmente:
+
+```bash
+ARBITRUM_RPC_URL=https://arbitrum-one-rpc.publicnode.com
+WATCH_WALLET=0xYourWallet
+```
+
+`.env` no debe subirse al repo.
+
+### Build
+
+```bash
+forge build --sizes
+```
+
+### Tests Unitarios
 
 ```bash
 forge test -vv --match-contract SwapAppTest
 forge test -vv --match-contract V3LiquidityStrategyTest
+forge test -vv --match-contract V3PriceLimitHelperTest
 forge test -vv --match-contract V3QuoteHelperTest
+forge test -vv --match-contract V3RangeHelperTest
 ```
 
-### Tests fork (Arbitrum)
+### Tests Fork Arbitrum
 
 ```bash
-export ARBITRUM_RPC_URL="https://arb1.arbitrum.io/rpc"
-forge test -vv --match-contract SwapAppForkArbitrumTest
+ARBITRUM_RPC_URL=https://arbitrum-one-rpc.publicnode.com forge test -vv --match-contract SwapAppForkArbitrumTest
 ```
 
-### Coverage
+Test puntual de posicion V3 activa + fees:
 
 ```bash
-forge coverage --report summary
+ARBITRUM_RPC_URL=https://arbitrum-one-rpc.publicnode.com forge test -vv --match-test test_fork_v3_position_remains_active_and_collects_fees_after_swaps
+```
+
+### Balances
+
+```bash
+source .env
+forge script script/CheckBalances.s.sol:CheckBalances --rpc-url "$ARBITRUM_RPC_URL"
 ```
 
 ### Formato
@@ -117,15 +117,37 @@ forge fmt
 forge fmt --check
 ```
 
+## Prueba Real Controlada
+
+Usar [ops/REAL_TEST_RUNBOOK.md](/home/pablowiker/foundry-study/swapApp/ops/REAL_TEST_RUNBOOK.md).
+
+Primer objetivo:
+
+- monto chico de USDC
+- Arbitrum One
+- V3 con exposicion `Low`
+- slippage definido
+- `sqrtPriceLimitX96` sugerido por helper
+- registrar balances, tx hashes, gas, refunds y fees
+
+## Proxima Sesion
+
+- Revisar git status y confirmar que no queden cambios sin entender.
+- Ejecutar unit tests y fork test principal.
+- Si se va a probar real: completar `.env`, correr balances y seguir el runbook.
+- Antes de integrar en Zum Pay: decidir si se deploya este modulo como contratos separados o si se empaqueta como modulo interno.
+
+## Seguridad
+
+Este repositorio es educativo/prototipo. Antes de produccion:
+
+- Auditoria externa.
+- Ownership seguro (multisig/timelock si aplica).
+- RPC protegido para ejecuciones sensibles.
+- Politica de slippage/deadline por defecto.
+- Monitoreo de balances, posiciones, refunds y fees.
+- UX clara: esto no es renta fija ni rendimiento garantizado.
+
 ## Repositorio
 
 https://github.com/polwiker1/SwapAppStudyFoundry-
-
-## Nota de seguridad
-
-Proyecto educativo/prototipo. Antes de produccion:
-
-- Auditoria externa.
-- Ownership seguro (multisig/timelock).
-- Politica de fondeo de rewards.
-- Monitoreo on-chain de eventos y parametros.

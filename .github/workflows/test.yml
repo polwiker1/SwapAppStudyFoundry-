@@ -38,7 +38,9 @@ jobs:
         run: |
           forge test -vvv --match-contract SwapAppTest
           forge test -vvv --match-contract V3LiquidityStrategyTest
+          forge test -vvv --match-contract V3PriceLimitHelperTest
           forge test -vvv --match-contract V3QuoteHelperTest
+          forge test -vvv --match-contract V3RangeHelperTest
 
       - name: Run Forge fork tests
         if: ${{ secrets.ARBITRUM_RPC_URL != '' }}

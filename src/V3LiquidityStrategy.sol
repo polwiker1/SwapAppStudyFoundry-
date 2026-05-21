@@ -104,7 +104,6 @@ contract V3LiquidityStrategy {
                     tokenOut: p.tokenOther,
                     fee: p.fee,
                     recipient: address(this),
-                    deadline: p.deadline,
                     amountIn: amountToSwap,
                     amountOutMinimum: p.amountOutMinSwap,
                     sqrtPriceLimitX96: p.sqrtPriceLimitX96

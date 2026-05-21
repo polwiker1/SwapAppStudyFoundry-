@@ -6,7 +6,9 @@ import {ERC20} from "../lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.s
 
 import {SwappApp} from "../src/swappApp.sol";
 import {V3LiquidityStrategy} from "../src/V3LiquidityStrategy.sol";
+import {V3PriceLimitHelper} from "../src/V3PriceLimitHelper.sol";
 import {V3QuoteHelper} from "../src/V3QuoteHelper.sol";
+import {V3RangeHelper} from "../src/V3RangeHelper.sol";
 import {GovernanceToken} from "../src/GovernanceToken.sol";
 import {ISwapRouter02} from "../src/interfaces.sol/ISwapRouter02.sol";
 import {INonfungiblePositionManager} from "../src/interfaces.sol/INonfungiblePositionManager.sol";
@@ -108,7 +110,6 @@ contract MockSwapRouter02 {
         external
         returns (uint256 amountOut)
     {
-        require(block.timestamp <= params.deadline, "router expired");
         require(params.amountIn >= params.amountOutMinimum, "too little received");
 
         MockERC20(params.tokenIn).transferFrom(msg.sender, address(this), params.amountIn);
@@ -163,16 +164,60 @@ contract MockQuoterV2 {
     }
 }
 
+contract MockV3Pool {
+    int24 public immutable tickSpacing;
+    int24 public currentTick;
+
+    constructor(int24 _tickSpacing, int24 _currentTick) {
+        tickSpacing = _tickSpacing;
+        currentTick = _currentTick;
+    }
+
+    function setCurrentTick(int24 tick) external {
+        currentTick = tick;
+    }
+
+    function slot0()
+        external
+        view
+        returns (
+            uint160 sqrtPriceX96,
+            int24 tick,
+            uint16 observationIndex,
+            uint16 observationCardinality,
+            uint16 observationCardinalityNext,
+            uint8 feeProtocol,
+            bool unlocked
+        )
+    {
+        sqrtPriceX96 = 1 << 96;
+        tick = currentTick;
+        observationIndex = 0;
+        observationCardinality = 0;
+        observationCardinalityNext = 0;
+        feeProtocol = 0;
+        unlocked = true;
+    }
+}
+
 contract SwapAppForkArbitrumTest is Test {
     address internal constant ARBITRUM_V2_ROUTER = 0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24;
     address internal constant ARBITRUM_V2_FACTORY = 0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9;
+    address internal constant ARBITRUM_V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
+    address internal constant ARBITRUM_SWAP_ROUTER02 = 0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45;
+    address internal constant ARBITRUM_NONFUNGIBLE_POSITION_MANAGER = 0xC36442b4a4522E871399CD717aBDD847Ab11FE88;
     address internal constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     address internal constant WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
+    uint24 internal constant USDC_WETH_V3_FEE = 500;
+    int24 internal constant FULL_RANGE_TICK_LOWER_500 = -887_270;
+    int24 internal constant FULL_RANGE_TICK_UPPER_500 = 887_270;
 
     SwappApp app;
+    V3LiquidityStrategy v3Strategy;
     GovernanceToken gov;
 
     address user = address(0xBEEF);
+    address trader = address(0xA11CE);
     address treasury = address(0xCAFE);
 
     function setUp() external {
@@ -180,12 +225,24 @@ contract SwapAppForkArbitrumTest is Test {
 
         gov = new GovernanceToken("Governance", "GOV");
         app = new SwappApp(ARBITRUM_V2_ROUTER, ARBITRUM_V2_FACTORY, address(gov), treasury, 10, 3000, 1e18);
+        v3Strategy =
+            new V3LiquidityStrategy(ARBITRUM_V3_FACTORY, ARBITRUM_SWAP_ROUTER02, ARBITRUM_NONFUNGIBLE_POSITION_MANAGER);
         gov.mint(address(app), 1_000_000e18);
 
         deal(USDC, user, 5_000e6);
+        deal(USDC, trader, 50_000e6);
+        deal(WETH, trader, 20e18);
 
         vm.prank(user);
         ERC20(USDC).approve(address(app), type(uint256).max);
+
+        vm.prank(user);
+        ERC20(USDC).approve(address(v3Strategy), type(uint256).max);
+
+        vm.startPrank(trader);
+        ERC20(USDC).approve(ARBITRUM_SWAP_ROUTER02, type(uint256).max);
+        ERC20(WETH).approve(ARBITRUM_SWAP_ROUTER02, type(uint256).max);
+        vm.stopPrank();
     }
 
     function test_fork_swap_on_arbitrum_router() external {
@@ -236,6 +293,67 @@ contract SwapAppForkArbitrumTest is Test {
         uint256 lpAfter = ERC20(lpToken).balanceOf(user);
         assertGt(liquidity, 0);
         assertEq(lpAfter, lpBefore + liquidity);
+    }
+
+    function test_fork_v3_position_remains_active_and_collects_fees_after_swaps() external {
+        V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params memory p =
+            V3LiquidityStrategy.AddLiquiditySingleTokenUSDCV3Params({
+                usdc: USDC,
+                tokenOther: WETH,
+                fee: USDC_WETH_V3_FEE,
+                tickLower: FULL_RANGE_TICK_LOWER_500,
+                tickUpper: FULL_RANGE_TICK_UPPER_500,
+                amountInUSDC: 1_000e6,
+                amountOutMinSwap: 0,
+                amountUSDCMinMint: 0,
+                amountTokenMinMint: 0,
+                sqrtPriceLimitX96: 0,
+                deadline: block.timestamp + 30 minutes
+            });
+
+        vm.prank(user);
+        (uint256 tokenId, uint128 mintedLiquidity,,,) = v3Strategy.addLiquiditySingleTokenUSDCV3(p);
+
+        assertEq(INonfungiblePositionManager(ARBITRUM_NONFUNGIBLE_POSITION_MANAGER).ownerOf(tokenId), user);
+        assertGt(mintedLiquidity, 0);
+
+        vm.warp(block.timestamp + 1 days);
+        vm.roll(block.number + 7_200);
+
+        _swapV3FromTrader(USDC, WETH, 20_000e6);
+        _swapV3FromTrader(WETH, USDC, 5e17);
+
+        (,,,,,,, uint128 activeLiquidity,,,,) =
+            INonfungiblePositionManager(ARBITRUM_NONFUNGIBLE_POSITION_MANAGER).positions(tokenId);
+        assertEq(activeLiquidity, mintedLiquidity);
+
+        vm.prank(user);
+        (uint256 amount0Collected, uint256 amount1Collected) = INonfungiblePositionManager(
+                ARBITRUM_NONFUNGIBLE_POSITION_MANAGER
+            )
+            .collect(
+                INonfungiblePositionManager.CollectParams({
+                    tokenId: tokenId, recipient: user, amount0Max: type(uint128).max, amount1Max: type(uint128).max
+                })
+            );
+
+        assertGt(amount0Collected + amount1Collected, 0);
+    }
+
+    function _swapV3FromTrader(address tokenIn, address tokenOut, uint256 amountIn) internal {
+        vm.prank(trader);
+        ISwapRouter02(ARBITRUM_SWAP_ROUTER02)
+            .exactInputSingle(
+                ISwapRouter02.ExactInputSingleParams({
+                    tokenIn: tokenIn,
+                    tokenOut: tokenOut,
+                    fee: USDC_WETH_V3_FEE,
+                    recipient: trader,
+                    amountIn: amountIn,
+                    amountOutMinimum: 0,
+                    sqrtPriceLimitX96: 0
+                })
+            );
     }
 }
 
@@ -685,5 +803,110 @@ contract V3QuoteHelperTest is Test {
     function test_constructor_reverts_when_quoter_is_zero() external {
         vm.expectRevert("quoter=0");
         new V3QuoteHelper(address(0));
+    }
+}
+
+contract V3RangeHelperTest is Test {
+    MockERC20 usdc;
+    MockERC20 weth;
+    MockV3Factory factory;
+    MockV3Pool pool;
+    V3RangeHelper helper;
+
+    uint24 fee = 500;
+
+    function setUp() external {
+        usdc = new MockERC20("USD Coin", "USDC");
+        weth = new MockERC20("Wrapped Ether", "WETH");
+        factory = new MockV3Factory();
+        pool = new MockV3Pool(10, 203_456);
+        helper = new V3RangeHelper(address(factory));
+
+        factory.setPool(address(usdc), address(weth), fee, address(pool));
+    }
+
+    function test_preview_range_returns_low_medium_high_exposure_ranges() external view {
+        V3RangeHelper.RangePreview memory low =
+            helper.previewRange(address(usdc), address(weth), fee, V3RangeHelper.ExposureMode.Low);
+        V3RangeHelper.RangePreview memory medium =
+            helper.previewRange(address(usdc), address(weth), fee, V3RangeHelper.ExposureMode.Medium);
+        V3RangeHelper.RangePreview memory high =
+            helper.previewRange(address(usdc), address(weth), fee, V3RangeHelper.ExposureMode.High);
+
+        assertEq(low.pool, address(pool));
+        assertEq(low.currentTick, 203_456);
+        assertEq(low.tickSpacing, 10);
+
+        assertEq(low.tickLower, 193_450);
+        assertEq(low.tickUpper, 213_450);
+        assertEq(medium.tickLower, 200_450);
+        assertEq(medium.tickUpper, 206_450);
+        assertEq(high.tickLower, 202_650);
+        assertEq(high.tickUpper, 204_250);
+
+        assertGt(low.tickUpper - low.tickLower, medium.tickUpper - medium.tickLower);
+        assertGt(medium.tickUpper - medium.tickLower, high.tickUpper - high.tickLower);
+    }
+
+    function test_preview_range_floors_negative_ticks_to_spacing() external {
+        pool.setCurrentTick(-203_456);
+
+        V3RangeHelper.RangePreview memory high =
+            helper.previewRange(address(usdc), address(weth), fee, V3RangeHelper.ExposureMode.High);
+
+        assertEq(high.tickLower, -204_260);
+        assertEq(high.tickUpper, -202_660);
+    }
+
+    function test_preview_range_reverts_when_pool_missing() external {
+        vm.expectRevert("pool not found");
+        helper.previewRange(address(usdc), address(weth), 3000, V3RangeHelper.ExposureMode.Medium);
+    }
+}
+
+contract V3PriceLimitHelperTest is Test {
+    MockERC20 usdc;
+    MockERC20 weth;
+    MockV3Factory factory;
+    MockV3Pool pool;
+    V3PriceLimitHelper helper;
+
+    uint24 fee = 500;
+
+    function setUp() external {
+        usdc = new MockERC20("USD Coin", "USDC");
+        weth = new MockERC20("Wrapped Ether", "WETH");
+        factory = new MockV3Factory();
+        pool = new MockV3Pool(10, 200_000);
+        helper = new V3PriceLimitHelper(address(factory));
+
+        factory.setPool(address(usdc), address(weth), fee, address(pool));
+    }
+
+    function test_preview_sqrt_price_limit_sets_limit_tick_by_swap_direction() external view {
+        V3PriceLimitHelper.PriceLimitPreview memory preview =
+            helper.previewSqrtPriceLimitX96(address(usdc), address(weth), fee, 100);
+
+        assertEq(preview.pool, address(pool));
+        assertEq(preview.currentTick, 200_000);
+        assertEq(preview.sqrtPriceLimitX96 > 0, true);
+
+        if (address(usdc) < address(weth)) {
+            assertEq(preview.zeroForOne, true);
+            assertEq(preview.limitTick, 199_900);
+        } else {
+            assertEq(preview.zeroForOne, false);
+            assertEq(preview.limitTick, 200_100);
+        }
+    }
+
+    function test_preview_sqrt_price_limit_reverts_when_slippage_is_too_high() external {
+        vm.expectRevert("slippage>bsp");
+        helper.previewSqrtPriceLimitX96(address(usdc), address(weth), fee, 10_001);
+    }
+
+    function test_preview_sqrt_price_limit_reverts_when_pool_missing() external {
+        vm.expectRevert("pool not found");
+        helper.previewSqrtPriceLimitX96(address(usdc), address(weth), 3000, 100);
     }
 }

@@ -10,5 +10,11 @@ out/
 # Docs
 docs/
 
-# Dotenv file
+# Dotenv files
 .env
+.env.*
+!.env.example
+
+# Local operation notes/results
+*.local.md
+ops/*.local.md
