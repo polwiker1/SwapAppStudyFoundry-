@@ -2,6 +2,8 @@
 
 `SwapApp` es un modulo DeFi educativo/prototipo sobre Foundry. El objetivo es simplificar operaciones de swap y provision de liquidez desde una entrada simple en USDC, con foco en integracion futura dentro de Zum Pay.
 
+/*/*/SwapApp is an educational/prototype DeFi module built on Foundry. Its goal is to simplify swap operations and liquidity provision from a single USDC entry point, with a future‑focused design aimed at seamless integration into Zum Pay.
+
 ## Estado Actual
 
 - Swap ERC-20 con fee de protocolo y rewards en token de gobernanza.
@@ -13,10 +15,32 @@
 - Helper de limite de precio V3 para sugerir `sqrtPriceLimitX96` y evitar usar `0` en produccion.
 - Fork test V3 que valida posicion activa y cobro de fees despues de swaps.
 - Runbook para prueba real controlada en Arbitrum.
+- 
+-***/ Current Status
+ERC‑20 swap with protocol fee and governance‑token rewards.
+
+V2 liquidity from a single token (USDC -> partial swap -> add liquidity).
+
+V3 strategy to create concentrated liquidity positions starting from USDC.
+
+Guided V3 exit to reduce liquidity, collect tokens, and return to USDC.
+
+V3 quote helper to calculate minimum amounts based on slippage.
+
+V3 range helper to translate exposure profiles Low / Medium / High into tickLower / tickUpper.
+
+V3 price‑limit helper to suggest sqrtPriceLimitX96 and avoid using 0 in production.
+
+V3 fork test validating active position and fee collection after swaps.
+
+Runbook for controlled real‑world testing on Arbitrum.
 
 ## Idea de Producto
 
 El usuario no deberia tener que entender rutas, ticks, fee tiers o liquidez concentrada para operar.
+
+***Product Vision
+Users shouldn’t need to understand routes, ticks, fee tiers, or concentrated liquidity in order to operate.
 
 Flujo buscado:
 
@@ -25,6 +49,21 @@ Flujo buscado:
 3. En V3 elige perfil de exposicion: `Low`, `Medium` o `High`.
 4. La app calcula quote, rango, minimos y limite de precio.
 5. El usuario firma una operacion con condiciones claras.
+  
+***    Product Vision
+Users shouldn’t need to understand routes, ticks, fee tiers, or concentrated liquidity to operate.
+
+Target flow:
+
+User enters with USDC.
+
+Chooses simple V2 or concentrated V3.
+
+In V3, selects an exposure profile: Low, Medium, or High.
+
+The app calculates quotes, ranges, minimums, and price limits.
+
+The user signs a single transaction with clear conditions.
 
 ## Arquitectura
 
